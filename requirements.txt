@@ -1,0 +1,10 @@
+python-telegram-bot==21.10
+telethon==1.38.1
+yt-dlp==2025.2.19
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+pydantic-settings==2.7.1
+aiosqlite==0.21.0
+PySocks==1.7.1
+python-socks[asyncio]==2.6.1
+cryptg==0.5.0.post0

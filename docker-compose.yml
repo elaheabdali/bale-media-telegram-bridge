@@ -1,0 +1,12 @@
+services:
+  bale-bridge:
+    build: .
+    container_name: bale-media-telegram-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    volumes:
+      - ./downloads:/app/downloads
+    network_mode: bridge
