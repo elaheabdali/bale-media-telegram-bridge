@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.services.telegram_client import TgChannel, TgMessageItem
+from src.services.telegram_client import ChatFilterType, TgChannel, TgMessageItem
 from src.services.video_downloader import ChannelInfo, QualityOption, VideoSummary
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("📡 چنل‌ها و گروه‌های تلگرام من", callback_data="menu:tg_channels")],
             [InlineKeyboardButton("🔍 جستجوی چنل ویدیویی (یوتیوب)", callback_data="menu:yt_search")],
-            [InlineKeyboardButton("📡 چنل‌های تلگرام من", callback_data="menu:tg_channels")],
             [InlineKeyboardButton("🔗 دانلود مستقیم با لینک", callback_data="menu:direct_url")],
+            [InlineKeyboardButton("📊 وضعیت اتصال و حافظه", callback_data="menu:status")],
         ]
     )
 
@@ -19,6 +20,16 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 def back_to_home_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="menu:home")]]
+    )
+
+
+def status_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔄 بررسی مجدد وضعیت", callback_data="menu:status")],
+            [InlineKeyboardButton("🧹 پاکسازی فایل‌های موقت", callback_data="sys:cleanup")],
+            [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="menu:home")],
+        ]
     )
 
 
@@ -61,6 +72,7 @@ def yt_qualities_keyboard(options: list[QualityOption]) -> InlineKeyboardMarkup:
 def tg_channels_keyboard(
     channels: list[TgChannel],
     page: int,
+    filter_type: ChatFilterType = "all",
     per_page: int = 8,
 ) -> InlineKeyboardMarkup:
     total = len(channels)
@@ -69,10 +81,27 @@ def tg_channels_keyboard(
     start = page * per_page
     chunk = channels[start : start + per_page]
 
-    rows: list[list[InlineKeyboardButton]] = []
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                "✅ همه" if filter_type == "all" else "🗂 همه",
+                callback_data="tg:type:all",
+            ),
+            InlineKeyboardButton(
+                "✅ چنل‌ها" if filter_type == "channels" else "📢 چنل‌ها",
+                callback_data="tg:type:channels",
+            ),
+            InlineKeyboardButton(
+                "✅ گروه‌ها" if filter_type == "groups" else "👥 گروه‌ها",
+                callback_data="tg:type:groups",
+            ),
+        ]
+    ]
+
     for ch in chunk:
-        uname = f" (@{ch.username})" if ch.username else ""
-        label = f"📢 {ch.title[:38]}{uname}"
+        icon = "📢" if ch.kind == "channel" else "👥"
+        unread = f" ({ch.unread_count} جدید)" if ch.unread_count > 0 else ""
+        label = f"{icon} {ch.title[:36]}{unread}"
         rows.append([InlineKeyboardButton(label[:60], callback_data=f"tg:msg:{ch.channel_id}:0")])
 
     nav_row: list[InlineKeyboardButton] = []
@@ -85,8 +114,9 @@ def tg_channels_keyboard(
 
     rows.append(
         [
-            InlineKeyboardButton("🔎 فیلتر نام چنل", callback_data="tg:filter"),
-            InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu:home"),
+            InlineKeyboardButton("🔎 جستجوی نام", callback_data="tg:filter"),
+            InlineKeyboardButton("🔄 بروزرسانی", callback_data="menu:tg_channels"),
+            InlineKeyboardButton("🏠 منو", callback_data="menu:home"),
         ]
     )
     return InlineKeyboardMarkup(rows)
@@ -133,7 +163,13 @@ def tg_messages_keyboard(
 
     rows.append(
         [
-            InlineKeyboardButton("📡 لیست چنل‌ها", callback_data="tg:page:0"),
+            InlineKeyboardButton("🔄 بروزرسانی چت", callback_data=f"tg:msg:{channel_id}:0"),
+            InlineKeyboardButton("🔎 جستجو در چت", callback_data=f"tg:search:{channel_id}"),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton("📡 بازگشت به لیست چنل‌ها و گروه‌ها", callback_data="tg:page:0"),
             InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu:home"),
         ]
     )

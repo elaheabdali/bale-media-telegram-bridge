@@ -17,6 +17,7 @@ from src.bale_bot.delivery import deliver_file
 from src.bale_bot.keyboards import (
     back_to_home_keyboard,
     main_menu_keyboard,
+    status_keyboard,
     tg_channels_keyboard,
     tg_messages_keyboard,
     yt_channels_keyboard,
@@ -25,7 +26,7 @@ from src.bale_bot.keyboards import (
 )
 from src.config import Settings
 from src.services.storage import StorageService
-from src.services.telegram_client import TelegramBridgeService
+from src.services.telegram_client import ChatFilterType, TelegramBridgeService
 from src.services.video_downloader import VideoDownloaderService
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,37 @@ class BaleBotHandlers:
                 parse_mode="Markdown",
             )
 
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            await self._deny_access(update)
+            return
+        if update.effective_message:
+            msg = await update.effective_message.reply_text("⏳ در حال بررسی وضعیت اتصال...")
+            text = await self._build_status_text()
+            await msg.edit_text(text, reply_markup=status_keyboard(), parse_mode="Markdown")
+
+    async def _build_status_text(self) -> str:
+        tg_status = await self.tg_service.get_connection_status()
+        if tg_status["connected"] and tg_status["authorized"]:
+            uname = f" (@{tg_status['username']})" if tg_status["username"] else ""
+            tg_line = f"🟢 **متصل** به اکانت: `{tg_status['name']}{uname}`"
+        else:
+            tg_line = "🔴 **قطع** (نیاز به بررسی اتصال یا سشن تلگرام)"
+
+        files = list(self.settings.DOWNLOAD_DIR.iterdir()) if self.settings.DOWNLOAD_DIR.exists() else []
+        media_files = [
+            f for f in files if f.is_file() and f.name != ".gitkeep" and not f.name.startswith("storage.db")
+        ]
+        total_mb = sum(f.stat().st_size for f in media_files) / (1024 * 1024)
+
+        return (
+            "📊 **وضعیت سیستم و اتصال**\n\n"
+            f"📡 وضعیت تلگرام: {tg_line}\n"
+            f"🌐 آدرس لینک مستقیم: `{self.settings.PUBLIC_BASE_URL}`\n"
+            f"📁 فایل‌های موقت روی دیسک: `{len(media_files)}` فایل (`{total_mb:.1f} MB`)\n"
+            f"⏱ زمان نگهداری فایل‌ها: `{self.settings.FILE_RETENTION_HOURS}` ساعت"
+        )
+
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
             await self._deny_access(update)
@@ -116,25 +148,56 @@ class BaleBotHandlers:
 
         elif state == "awaiting_tg_filter":
             context.user_data.pop("state", None)
-            status = await message.reply_text("🔎 در حال فیلتر کردن چنل‌های تلگرام...")
+            filter_type: ChatFilterType = context.user_data.get("tg_filter_type", "all")
+            status = await message.reply_text("🔎 در حال جستجو در چنل‌ها و گروه‌های تلگرام...")
             try:
-                channels = await self.tg_service.list_channels(search_query=text)
+                channels = await self.tg_service.list_dialogs(search_query=text, filter_type=filter_type)
                 if not channels:
                     await status.edit_text(
-                        f"❌ هیچ چنلی با عبارت `{text}` یافت نشد.",
+                        f"❌ هیچ چنل یا گروهی با عبارت `{text}` یافت نشد.",
                         reply_markup=back_to_home_keyboard(),
                         parse_mode="Markdown",
                     )
                     return
                 context.user_data["tg_channels"] = channels
                 await status.edit_text(
-                    f"📡 **چنل‌های یافت‌شده برای `{text}` ({len(channels)} مورد):**",
-                    reply_markup=tg_channels_keyboard(channels, page=0),
+                    f"📡 **نتایج جستجو برای `{text}` ({len(channels)} مورد):**",
+                    reply_markup=tg_channels_keyboard(channels, page=0, filter_type=filter_type),
                     parse_mode="Markdown",
                 )
             except Exception as exc:
                 logger.exception("Telegram channel filter failed")
-                await status.edit_text(f"❌ خطا در دریافت چنل‌ها: {exc}")
+                await status.edit_text(f"❌ خطا در دریافت لیست: {exc}")
+
+        elif state == "awaiting_tg_chat_search":
+            context.user_data.pop("state", None)
+            channel_id = context.user_data.get("tg_search_channel_id")
+            if not channel_id:
+                await message.reply_text("⚠️ چت انتخاب‌شده منقضی شد.", reply_markup=main_menu_keyboard())
+                return
+            status = await message.reply_text(f"🔎 در حال جستجوی `{text}` در پیام‌های این چت...", parse_mode="Markdown")
+            try:
+                msg_page = await self.tg_service.get_channel_messages(
+                    channel_id=int(channel_id),
+                    limit=5,
+                    offset_id=0,
+                    search_query=text,
+                )
+                if not msg_page.items:
+                    await status.edit_text(
+                        f"📭 پیامی با عبارت `{text}` در این چت پیدا نشد.",
+                        reply_markup=tg_messages_keyboard(int(channel_id), [], 0, has_older=False),
+                        parse_mode="Markdown",
+                    )
+                    return
+                await status.edit_text(
+                    self._format_messages_text(msg_page.channel_title, msg_page.items, page=0, search_query=text),
+                    reply_markup=tg_messages_keyboard(int(channel_id), msg_page.items, 0, has_older=False),
+                    parse_mode="Markdown",
+                )
+            except Exception as exc:
+                logger.exception("In-chat search failed")
+                await status.edit_text(f"❌ خطا در جستجوی پیام‌ها: {exc}", reply_markup=back_to_home_keyboard())
 
         else:
             await message.reply_text(
@@ -163,6 +226,20 @@ class BaleBotHandlers:
                 parse_mode="Markdown",
             )
 
+        elif data == "menu:status":
+            await query.edit_message_text("⏳ در حال بررسی وضعیت اتصال...")
+            text = await self._build_status_text()
+            await query.edit_message_text(text, reply_markup=status_keyboard(), parse_mode="Markdown")
+
+        elif data == "sys:cleanup":
+            removed = await self.storage.cleanup_expired(force_all=True)
+            text = await self._build_status_text()
+            await query.edit_message_text(
+                f"🧹 `{removed}` فایل پاکسازی شد.\n\n{text}",
+                reply_markup=status_keyboard(),
+                parse_mode="Markdown",
+            )
+
         elif data == "menu:yt_search":
             context.user_data["state"] = "awaiting_yt_channel"
             await query.edit_message_text(
@@ -180,7 +257,8 @@ class BaleBotHandlers:
             )
 
         elif data == "menu:tg_channels":
-            await self._load_tg_channels(query, context, page=0, refresh=True)
+            filter_type: ChatFilterType = context.user_data.get("tg_filter_type", "all")
+            await self._load_tg_channels(query, context, page=0, filter_type=filter_type, refresh=True)
 
         elif parts[0] == "yt" and parts[1] == "ch":
             idx = int(parts[2])
@@ -247,14 +325,30 @@ class BaleBotHandlers:
                 logger.exception("Video download failed")
                 await query.edit_message_text(f"❌ خطا در دانلود ویدیو: {exc}", reply_markup=back_to_home_keyboard())
 
+        elif parts[0] == "tg" and parts[1] == "type":
+            new_type: ChatFilterType = parts[2]  # type: ignore[assignment]
+            context.user_data["tg_filter_type"] = new_type
+            await self._load_tg_channels(query, context, page=0, filter_type=new_type, refresh=True)
+
         elif parts[0] == "tg" and parts[1] == "page":
             page = int(parts[2])
-            await self._load_tg_channels(query, context, page=page, refresh=False)
+            filter_type = context.user_data.get("tg_filter_type", "all")
+            await self._load_tg_channels(query, context, page=page, filter_type=filter_type, refresh=False)
 
         elif parts[0] == "tg" and parts[1] == "filter":
             context.user_data["state"] = "awaiting_tg_filter"
             await query.edit_message_text(
-                "🔎 **بخشی از نام یا یوزرنیم چنل تلگرام را وارد کنید:**",
+                "🔎 **بخشی از نام یا یوزرنیم چنل/گروه تلگرام را وارد کنید:**",
+                reply_markup=back_to_home_keyboard(),
+                parse_mode="Markdown",
+            )
+
+        elif parts[0] == "tg" and parts[1] == "search":
+            channel_id = int(parts[2])
+            context.user_data["state"] = "awaiting_tg_chat_search"
+            context.user_data["tg_search_channel_id"] = channel_id
+            await query.edit_message_text(
+                "🔎 **کلمه یا عبارت مورد نظر برای جستجو داخل این چت را ارسال کنید:**",
                 reply_markup=back_to_home_keyboard(),
                 parse_mode="Markdown",
             )
@@ -309,28 +403,63 @@ class BaleBotHandlers:
         query: Any,
         context: ContextTypes.DEFAULT_TYPE,
         page: int,
+        filter_type: ChatFilterType,
         refresh: bool,
     ) -> None:
         channels = context.user_data.get("tg_channels")
         if refresh or channels is None:
-            await query.edit_message_text("⏳ در حال دریافت لیست چنل‌های تلگرام شما...")
+            await query.edit_message_text("⏳ در حال دریافت لیست چنل‌ها و گروه‌های تلگرام شما...")
             try:
-                channels = await self.tg_service.list_channels()
+                channels = await self.tg_service.list_dialogs(filter_type=filter_type)
                 context.user_data["tg_channels"] = channels
             except Exception as exc:
-                logger.exception("Failed listing Telegram channels")
+                logger.exception("Failed listing Telegram dialogs")
                 await query.edit_message_text(f"❌ خطا در ارتباط با تلگرام: {exc}", reply_markup=back_to_home_keyboard())
                 return
 
         if not channels:
-            await query.edit_message_text("📭 هیچ چنل تلگرامی یافت نشد.", reply_markup=back_to_home_keyboard())
+            await query.edit_message_text(
+                "📭 هیچ چنل یا گروهی در این بخش یافت نشد.",
+                reply_markup=tg_channels_keyboard([], page=0, filter_type=filter_type),
+            )
             return
 
+        label_map = {"all": "همه چنل‌ها و گروه‌ها", "channels": "چنل‌ها", "groups": "گروه‌ها"}
         await query.edit_message_text(
-            f"📡 **چنل‌های تلگرام شما ({len(channels)} چنل):**\nصفحه {page + 1}",
-            reply_markup=tg_channels_keyboard(channels, page=page),
+            f"📡 **{label_map[filter_type]} ({len(channels)} مورد):**\n"
+            f"صفحه {page + 1} — برای مشاهده پیام‌ها روی هر مورد کلیک کنید:",
+            reply_markup=tg_channels_keyboard(channels, page=page, filter_type=filter_type),
             parse_mode="Markdown",
         )
+
+    def _format_messages_text(
+        self,
+        channel_title: str,
+        items: list[Any],
+        page: int,
+        search_query: str | None = None,
+    ) -> str:
+        header = f"📢 **{channel_title}**"
+        if search_query:
+            header += f" (جستجو: `{search_query}`)"
+        else:
+            header += f" (صفحه {page + 1})"
+
+        lines: list[str] = [f"{header}\n"]
+        for item in items:
+            badge = f" | {item.media_badge}" if item.media_badge else ""
+            sender = f"👤 **{item.sender_name}:**\n" if item.sender_name else ""
+            snippet = item.text[:420] + ("..." if len(item.text) > 420 else "")
+            if not snippet:
+                snippet = "_(بدون متن)_"
+            lines.append(
+                f"➖➖➖➖➖\n🔹 **#{item.message_id}** | 🕒 `{item.date_str}`{badge}\n{sender}{snippet}\n"
+            )
+
+        full_text = "\n".join(lines)
+        if len(full_text) > 3800:
+            full_text = full_text[:3800] + "\n\n... _(ادامه متن به دلیل محدودیت طول پیام کوتاه شد)_"
+        return full_text
 
     async def _show_tg_messages(
         self,
@@ -340,13 +469,15 @@ class BaleBotHandlers:
         page: int,
     ) -> None:
         offsets_map: dict[int, list[int]] = context.user_data.setdefault("tg_offsets", {})
+        if page == 0:
+            offsets_map[channel_id] = [0]
         offsets = offsets_map.setdefault(channel_id, [0])
 
         if page < 0:
             page = 0
         offset_id = offsets[page] if page < len(offsets) else offsets[-1]
 
-        await query.edit_message_text("⏳ در حال دریافت پیام‌های چنل...")
+        await query.edit_message_text("⏳ در حال دریافت پیام‌های این چت...")
         try:
             msg_page = await self.tg_service.get_channel_messages(
                 channel_id=channel_id,
@@ -368,18 +499,7 @@ class BaleBotHandlers:
             )
             return
 
-        lines: list[str] = [f"📢 **{msg_page.channel_title}** (صفحه {page + 1})\n"]
-        for item in msg_page.items:
-            badge = f" | {item.media_badge}" if item.media_badge else ""
-            snippet = item.text[:450] + ("..." if len(item.text) > 450 else "")
-            if not snippet:
-                snippet = "_(بدون متن)_"
-            lines.append(f"🔹 **#{item.message_id}** | 🕒 `{item.date_str}`{badge}\n{snippet}\n")
-
-        full_text = "\n".join(lines)
-        if len(full_text) > 3800:
-            full_text = full_text[:3800] + "\n\n... _(ادامه متن به دلیل محدودیت طول پیام کوتاه شد)_"
-
+        full_text = self._format_messages_text(msg_page.channel_title, msg_page.items, page)
         await query.edit_message_text(
             full_text,
             reply_markup=tg_messages_keyboard(channel_id, msg_page.items, page, msg_page.has_older),
@@ -433,5 +553,6 @@ class BaleBotHandlers:
 
 def register_handlers(application: Application, handlers: BaleBotHandlers) -> None:
     application.add_handler(CommandHandler("start", handlers.start_command))
+    application.add_handler(CommandHandler("status", handlers.status_command))
     application.add_handler(CallbackQueryHandler(handlers.handle_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_text))

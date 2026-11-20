@@ -128,8 +128,8 @@ class StorageService:
             await db.execute("DELETE FROM download_tokens WHERE token = ?", (token,))
             await db.commit()
 
-    async def cleanup_expired(self) -> int:
-        cutoff = time.time() - self.retention_seconds
+    async def cleanup_expired(self, force_all: bool = False) -> int:
+        cutoff = time.time() + 1 if force_all else (time.time() - self.retention_seconds)
         deleted_count = 0
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -149,18 +149,20 @@ class StorageService:
 
             await db.commit()
 
-        # Also clean orphan files in downloads/ older than retention_seconds
+        # Also clean orphan files in downloads/
         for path in self.download_dir.iterdir():
             if path.name in {".gitkeep", self.db_path.name} or path.name.startswith("storage.db"):
                 continue
             try:
-                if path.is_file() and (time.time() - path.stat().st_mtime) > self.retention_seconds:
+                if path.is_file() and (
+                    force_all or (time.time() - path.stat().st_mtime) > self.retention_seconds
+                ):
                     path.unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning("Failed to remove orphan file %s: %s", path, exc)
 
         if deleted_count:
-            logger.info("Cleanup removed %d expired download entries.", deleted_count)
+            logger.info("Cleanup removed %d download entries.", deleted_count)
         return deleted_count
 
 
